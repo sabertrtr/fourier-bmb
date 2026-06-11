@@ -1,0 +1,15 @@
+name: bmb
+services:
+  bmb:
+    build: .
+    container_name: bmb
+    restart: unless-stopped
+    networks:
+      - synapse_default
+      - danbooru_default
+    # No ports published to host — Synapse reaches it internally on 8009
+networks:
+  synapse_default:
+    external: true
+  danbooru_default:
+    external: true

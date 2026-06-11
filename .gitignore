@@ -1,0 +1,6 @@
+node_modules/
+strikes.json
+audit.log
+*.tmp
+config.yaml
+bmb-registration.yaml

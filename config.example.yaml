@@ -1,0 +1,23 @@
+homeserver:
+  url: "http://synapse:8008"
+  domain: "example.net"
+danbooru:
+  url: "http://danbooru:3000"
+  # Dedicated Danbooru bot account and its API key (keep the real key out of git)
+  username: "bmb"
+  api_key: "YOUR_DANBOORU_API_KEY"
+bridge:
+  port: 8009
+  # Rooms where tagging is disabled (room IDs)
+  disabled_rooms: []
+  # Minimum power level required to edit tags (enforced by your Matrix client)
+  tag_edit_power_level: 25
+  # Default rating for auto-created posts: g (general), s (sensitive), q (questionable), e (explicit)
+  default_rating: "q"
+  # Whether to run the tagging pipeline on images posted in DMs (2-member rooms)
+  tag_in_dms: false
+  # User IDs allowed to reset strikes via DM command
+  strike_reset_admins:
+    - "@admin:example.net"
+  # Power level required in a room to invite the bot
+  invite_power_level: 100
