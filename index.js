@@ -31,6 +31,24 @@ async function joinedMemberCount(bridge, roomId) {
   }
 }
 
+// True only if the bot user is currently joined to the room. Used to skip
+// events from rooms the bot isn't in (e.g. backlog from a previously over-broad
+// appservice namespace), so the appservice transaction is ACKed and the stream
+// drains instead of wedging on an un-actionable foreign-room event.
+async function botIsJoined(bridge, roomId, botUserId) {
+  try {
+    const state = await bridge.getIntent().roomState(roomId);
+    return state.some(
+      (e) =>
+        e.type === "m.room.member" &&
+        e.state_key === botUserId &&
+        e.content.membership === "join"
+    );
+  } catch (e) {
+    return false; // can't read state => not a member
+  }
+}
+
 function isRoomDisabled(roomId) {
   return (config.bridge.disabled_rooms || []).includes(roomId);
 }
@@ -237,6 +255,14 @@ new Cli({
             ) {
               const verdict = await invites.handleInvite(event, inviteDeps(bridge), config);
               console.log(`[invite] ${event.sender} -> ${event.room_id}: ${verdict}`);
+              return;
+            }
+
+            // Skip any non-invite event from a room the bot isn't joined to.
+            // This ACKs (drains) backlog left over from a previously over-broad
+            // appservice namespace, and is correct defense-in-depth: the bridge
+            // only ever acts in rooms it was invited into and joined.
+            if (!(await botIsJoined(bridge, event.room_id, botUserId))) {
               return;
             }
 
