@@ -42,6 +42,20 @@ class DanbooruClient {
     return resp.data;
   }
 
+  // Look up an existing post by md5. Returns the post object, or null if none.
+  // Used to skip re-uploading a duplicate image (Danbooru rejects a duplicate
+  // md5 with a failed transaction / 500 on this fork's upload path).
+  async findPostByMd5(md5) {
+    const resp = await this._client().get("/posts.json", {
+      params: { tags: `md5:${md5}`, limit: 1 },
+      validateStatus: () => true,
+    });
+    if (resp.status === 200 && Array.isArray(resp.data) && resp.data.length > 0) {
+      return resp.data[0];
+    }
+    return null;
+  }
+
   async waitForUpload(uploadId, { intervalMs = 2000, timeoutMs = 120000 } = {}) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {

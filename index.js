@@ -84,6 +84,25 @@ async function handleImageEvent(bridge, event) {
   const filename =
     (event.content && event.content.body) || mxcUrl.split("/").pop() || "image";
 
+  // Duplicate check: if Danbooru already has a post with this image's md5, skip
+  // the (re-)upload — which on this fork fails with a 500 on duplicate md5 — and
+  // just point the room's tag state at the existing post. This makes a re-posted
+  // image an intended [skip], and still tags the new room correctly.
+  const md5 = require("crypto").createHash("md5").update(buffer).digest("hex");
+  const existing = await danbooru.findPostByMd5(md5);
+  if (existing) {
+    const tagString = existing.tag_string || "";
+    await bridge.getIntent().sendStateEvent(roomId, TAG_STATE_TYPE, mxcUrl, {
+      post_id: existing.id,
+      tags: tagString.split(/\s+/).filter(Boolean),
+      rating: existing.rating || config.bridge.default_rating,
+      updated_by: "bmb",
+      updated_at: Date.now(),
+    });
+    console.log(`[skip] duplicate md5 ${md5} -> existing post #${existing.id}`);
+    return;
+  }
+
   const upload = await danbooru.createUploadFromBytes(buffer, filename, contentType);
   const completed = await danbooru.waitForUpload(upload.id);
   const uma = completed.upload_media_assets && completed.upload_media_assets[0];

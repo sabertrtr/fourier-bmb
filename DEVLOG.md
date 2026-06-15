@@ -193,3 +193,93 @@ Restart Synapse (needed when the registration changes):
 ---
 
 Development log for the Fourier BMB build.
+
+---
+
+## 10. Incident: bot tagged images from rooms it was never invited to (2026-06-14)
+
+**Symptom:** BMB created Danbooru posts for images uploaded in rooms it had
+never been invited to, despite being a member of only one real room.
+
+**Root cause (the actual leak):** `bmb-registration.yaml` had a second `users`
+namespace entry — `{ exclusive: false, regex: "@.*" }` — alongside the intended
+exclusive `@bmb` claim. Appservice event routing delivers a service all events
+in any room containing a user that matches its user namespace. `@.*` matches
+every user, so every room matched, and Synapse firehosed ALL room events
+homeserver-wide to BMB. The invite gate was never involved because no
+invite/join was needed — events arrived directly. `rooms: []` was correct and
+not the cause; the leak was entirely the wildcard user namespace.
+
+**Fix (two layers, defense-in-depth):**
+1. Registration: removed the `@.*` entry, leaving only the exclusive `@bmb`
+   claim. Now Synapse only delivers events for rooms the bot is actually in.
+   (This file is gitignored; the fix is not in git history — recorded here.)
+2. Code (committed): added `botIsJoined()` and an `onEvent` guard that returns
+   early — ACKing the transaction — for any non-invite event from a room the bot
+   isn't joined to, instead of trying to act/join and erroring. Sits after the
+   invite block so invite authorization is unaffected.
+
+**Secondary issues untangled during the fix:**
+- **Token rotation.** The appservice `as_token`/`hs_token` were rotated (they had
+  been exposed). Both must be byte-identical in `/opt/synapse/data/bmb-registration.yaml`
+  AND `/opt/fourier/bmb/bmb-registration.yaml`. After editing, the Synapse copy
+  must be re-`chown 991:991` + `chmod 600` (sed -i resets ownership; Synapse
+  reads it as uid 991 and crash-loops on PermissionError otherwise).
+- **Stuck transaction backlog.** While the namespace was still wide and BMB was
+  erroring, Synapse queued appservice transactions and could not advance
+  (delivery is in-order; the stream blocks until the bridge returns 200). The
+  `botIsJoined` guard let BMB ACK the un-actionable foreign-room events and drain.
+- **Orphan registration.** Synapse held appservice state for a stale id
+  `booru-matrix-bridge` (the pre-Fourier id) in addition to the current
+  `fourier-bmb`. The orphan had permanently-undeliverable txns (no consumer).
+  Purged with:
+    DELETE FROM application_services_txns WHERE as_id = 'booru-matrix-bridge';
+    DELETE FROM application_services_state WHERE as_id = 'booru-matrix-bridge';
+- **Recoverer backoff.** An appservice marked `down` after failures is retried by
+  Synapse's recoverer on a backoff timer, not instantly. Mid-diagnosis the
+  streams looked permanently stuck when they were just inside the backoff window;
+  the recoverer then drained all pending txns (200s) and flipped `fourier-bmb`
+  back to `up` on its own. Inspect with:
+    SELECT as_id, state FROM application_services_state;
+    SELECT as_id, COUNT(*) FROM application_services_txns GROUP BY as_id;
+
+**Verified:** image posted in the legitimate room tags correctly; re-uploads of
+the same md5 are deduped by Danbooru; no foreign-room rooms produce any activity.
+
+**Note for later:** BMB's startup still calls `ensureRegistered()`
+(`/_matrix/client/v3/register`, m.login.application_service). Under MSC3861 MAS
+owns registration, so this can log `M_UNKNOWN_TOKEN: failed to register bot
+user`. `@bmb` already exists, so it's a harmless no-op, but the call should be
+made tolerant of that rejection (catch + log "skipped, MAS-owned") to avoid a
+misleading startup error.
+
+---
+
+## 11. Image dedup by md5 (2026-06-14)
+
+**Problem:** Re-posting an already-uploaded image produced `[error] onEvent:
+Request failed with status code 500`. Danbooru-side cause (this fork):
+`PG::InFailedSqlTransaction` at `upload.rb:187 process_upload!` — a duplicate
+md5 trips a failed statement, and the transaction stays poisoned, returning 500
+rather than a clean duplicate response.
+
+**Fix (BMB side, the correct place):**
+- `danbooru.js`: `findPostByMd5(md5)` — queries `GET /posts.json?tags=md5:<hash>`
+  and returns the existing post or null.
+- `index.js` `handleImageEvent`: after downloading the bytes, compute the md5
+  (`crypto`), call `findPostByMd5`. If a post exists, write the room's
+  `net.41chan.media.tags` state event pointing at the EXISTING post (so the new
+  room is still correctly tagged) and `return` with `[skip] duplicate md5 ->
+  existing post #N`, skipping the upload that would 500. Uses the existing post's
+  actual `rating` (falling back to default), since a known post may already have
+  a corrected rating.
+
+**Why BMB-side (not Synapse):** BMB sees images only after they're in Matrix, so
+this prevents duplicate *Danbooru posts*. It does NOT prevent duplicate *Matrix
+uploads* (Synapse mints a fresh MXC per upload by design). Pre-upload dedup at
+drag time is a planned feature for the custom Matrix client, where the md5 check
+can happen before the bytes reach Synapse and an existing MXC can be reused.
+
+**Verified:** new images tag normally (#19–#21); a re-post of #21 logged
+`[skip] duplicate md5 ... -> existing post #21` with no 500; md5 granularity
+correctly distinguished a lowres vs highres variant as separate posts.
